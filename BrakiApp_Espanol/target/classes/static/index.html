@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Braki App v3</title>
+  <style>
+    :root{--green:#1a8a3b;--red:#a80000}
+    body{font-family:Arial,Helvetica,sans-serif;margin:0;background:#f4f6f8}
+    .card{max-width:620px;margin:18px auto;padding:18px;background:#fff;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.06)}
+    label{display:block;margin-top:10px;font-weight:600}
+    input,select,button{width:100%;padding:10px;margin-top:6px;border-radius:8px;border:1px solid #d0d6db}
+    button{background:#007bff;color:#fff;border:0;cursor:pointer}
+    #infoSpeed{font-size:1.1rem;margin-top:8px}
+    #resultado{margin-top:14px;padding:12px;border-radius:8px;text-align:center}
+
+    /* Fullscreen alert overlay */
+    .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:9999;transition:background-color 0.4s}
+    .alertBox{max-width:760px;width:90%;padding:30px;border-radius:12px;color:#fff;text-align:center;animation:pop 0.4s ease}
+    @keyframes pop{from{transform:scale(0.95);opacity:0}to{transform:scale(1);opacity:1}}
+    /* pulsing background animation */
+    .pulse{animation: pulseBG 1s infinite alternate}
+    @keyframes pulseBG{from{filter:brightness(1)}to{filter:brightness(1.12)}}
+
+    .big{font-size:1.3rem;font-weight:700}
+    .small{font-size:0.9rem;color:#f0f0f0;margin-top:6px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Braki App v3 — Monitor de frenado</h2>
+
+    <div id="infoSpeed">Velocidad actual: <span id="speedVal">-</span> m/s</div>
+
+    <label>Masa del vehículo (kg)</label>
+    <input id="masa" type="number" value="1500">
+
+    <label>Área frontal (m²)</label>
+    <input id="area" type="number" value="2.2">
+
+    <label>Tipo de superficie</label>
+    <select id="superficie">
+      <option>Asfalto</option>
+      <option>Tierra</option>
+      <option>Grava</option>
+      <option>Nieve</option>
+      <option>Hielo</option>
+    </select>
+
+    <label>Condición climática</label>
+    <select id="condicion">
+      <option>Seco</option>
+      <option>Mojado</option>
+      <option>Compacta</option>
+      <option>Hielo</option>
+    </select>
+
+    <button id="btnCalc">Calcular frenado</button>
+
+    <div id="resultado">Esperando medición de velocidad (permite GPS)</div>
+  </div>
+
+  <!-- Fullscreen alert element (hidden by default) -->
+  <div id="overlay" class="overlay" style="display:none;">
+    <div id="alertBox" class="alertBox">
+      <div id="alertTitle" class="big"></div>
+      <div id="alertMsg" class="small"></div>
+      <div style="margin-top:16px;color:rgba(255,255,255,0.9)" id="alertDetail"></div>
+    </div>
+  </div>
+
+<script>
+// Fixed Cd
+const CD_FIXED = 0.32;
+let lastPos = null;
+let lastTime = null;
+let currentSpeed = 0; // m/s
+let watchId = null;
+
+function showOverlay(type, title, msg, detail){
+  const overlay = document.getElementById('overlay');
+  const alertBox = document.getElementById('alertBox');
+  const titleEl = document.getElementById('alertTitle');
+  const msgEl = document.getElementById('alertMsg');
+  const detailEl = document.getElementById('alertDetail');
+
+  titleEl.innerText = title;
+  msgEl.innerText = msg;
+  detailEl.innerText = detail || '';
+
+  if(type==='danger'){
+    overlay.style.backgroundColor = 'rgba(168,0,0,0.95)';
+    alertBox.style.background = 'linear-gradient(180deg,#c40000,#8b0000)';
+    alertBox.classList.add('pulse');
+  } else {
+    overlay.style.backgroundColor = 'rgba(26,138,59,0.95)';
+    alertBox.style.background = 'linear-gradient(180deg,#1a8a3b,#0f5f2a)';
+    alertBox.classList.remove('pulse');
+  }
+
+  overlay.style.display = 'flex';
+  // speak message with Spanish female if available
+  speakAlert(title + '. ' + msg + (detail?(' Tiempo estimado: '+detail):''));
+
+  // close after 6 seconds automatically
+  setTimeout(()=>{ overlay.style.display='none'; }, 6000);
+
+  // also close on touch/click
+  overlay.onclick = ()=>{ overlay.style.display='none'; }
+}
+
+function speakAlert(text){
+  if(!('speechSynthesis' in window)) return;
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = 'es-ES';
+  // try to pick a female voice
+  const voices = window.speechSynthesis.getVoices();
+  let chosen = null;
+  for(const v of voices){
+    if(v.lang && v.lang.startsWith('es') && /female|woman|Feminine|femenino/i.test(v.name+v.voiceURI+v.name)){
+      chosen = v; break;
+    }
+  }
+  if(!chosen){
+    // fallback: pick any Spanish voice
+    for(const v of voices){ if(v.lang && v.lang.startsWith('es')){ chosen=v; break; } }
+  }
+  if(chosen) utter.voice = chosen;
+  utter.rate = 1.0;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utter);
+}
+
+// Calculate speed from two positions if geolocation.speed not available
+function calcSpeedFromCoords(pos1, pos2){
+  const R = 6371000; // meters
+  const toRad = a=>a*Math.PI/180;
+  const lat1 = toRad(pos1.latitude), lon1 = toRad(pos1.longitude);
+  const lat2 = toRad(pos2.latitude), lon2 = toRad(pos2.longitude);
+  const dLat = lat2 - lat1; const dLon = lon2 - lon1;
+  const a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)*Math.sin(dLon/2);
+  const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const dist = R * c; // meters
+  const dt = (pos2.timestamp - pos1.timestamp)/1000.0; // seconds
+  if(dt<=0) return 0;
+  return dist/dt;
+}
+
+function startGPS(){
+  if(!navigator.geolocation){ alert('Geolocalización no disponible'); return; }
+  watchId = navigator.geolocation.watchPosition((p)=>{
+    const coords = p.coords;
+    const now = Date.now();
+    let speed = null;
+    if(coords.speed !== null && !isNaN(coords.speed) && coords.speed>0){
+      speed = coords.speed; // already in m/s
+    } else {
+      // estimate using lastPos
+      const current = { latitude: coords.latitude, longitude: coords.longitude, timestamp: now };
+      if(lastPos){
+        speed = calcSpeedFromCoords(lastPos, current);
+      } else speed = 0;
+      lastPos = current;
+    }
+    currentSpeed = speed || 0;
+    document.getElementById('speedVal').innerText = currentSpeed.toFixed(2);
+  }, (err)=>{ console.warn('geo err',err); }, { enableHighAccuracy:true, maximumAge:1000, timeout:10000 });
+}
+
+// start GPS immediately
+startGPS();
+
+// handle calculate button
+document.getElementById('btnCalc').addEventListener('click', async ()=>{
+  const m = parseFloat(document.getElementById('masa').value) || 1500;
+  const A = parseFloat(document.getElementById('area').value) || 2.2;
+  const superficie = document.getElementById('superficie').value;
+  const condicion = document.getElementById('condicion').value;
+  const v = currentSpeed || 0;
+
+  if(v<=0.1){
+    // if very low, ask user to confirm movement
+    if(!confirm('La velocidad actual es muy baja (¿estás en movimiento?). Continuar con cálculo?')) return;
+  }
+
+  const resp = await fetch('/api/calcular',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ v: v, m: m, A: A, Cd: CD_FIXED, superficie: superficie, condicion: condicion })
+  });
+  const data = await resp.json();
+
+  const r = document.getElementById('resultado');
+  r.innerHTML = `μ=${data.mu.toFixed(2)} · Tiempo: ${data.t.toFixed(2)} s · Distancia: ${data.d.toFixed(1)} m`;
+
+  if(data.t > 4){
+    showOverlay('danger','PELIGRO: FRENADO EXCESIVO','Atención: frenado peligroso', data.t.toFixed(2)+' segundos');
+  } else {
+    showOverlay('normal','Frenado normal','Condiciones aceptables', data.t.toFixed(2)+' segundos');
+  }
+});
+</script>
+</body>
+</html>
